@@ -13,6 +13,10 @@ from sklearn.metrics import (classification_report, roc_auc_score, roc_curve,
                              confusion_matrix)
 from sklearn.calibration import calibration_curve
 
+
+
+
+
 # -----------------------------
 # Config
 # -----------------------------
@@ -20,6 +24,73 @@ np.random.seed(42)
 FIGDIR = Path(__file__).resolve().parent / "figures"
 FIGDIR.mkdir(parents=True, exist_ok=True)
 SAVEFIG_KW = dict(dpi=200, bbox_inches="tight")
+
+def simulate_budget(df_in, alarms_per_day):
+    df = df_in.copy()
+    df["pred"] = 0
+    def mark_top(g):
+        k = min(alarms_per_day, len(g))
+        if k > 0:
+            top_idx = g["score"].nlargest(k).index
+            g.loc[top_idx, "pred"] = 1
+        return g
+    # pro Tag die Top-K Scores alarmieren
+    df = df.groupby(df["starttime"].dt.date, group_keys=False).apply(mark_top)
+    tp = ((df.pred == 1) & (df.insider == 1)).sum()
+    fp = ((df.pred == 1) & (df.insider == 0)).sum()
+    fn = ((df.pred == 0) & (df.insider == 1)).sum()
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    return {"alarms/day": alarms_per_day, "precision": precision, "recall": recall, "TP": tp, "FP": fp, "FN": fn}
+def daily_recall_report(df_eval, K, save_prefix=f"{FIGDIR}/daily_recall"):
+    df = df_eval.copy()
+    df["day"] = pd.to_datetime(df["starttime"]).dt.normalize()
+    df["pred"] = 0
+
+    # Top-K je Tag markieren (ohne Schwelle, wie in deiner Budget-Variante)
+    def mark_top(g):
+        k = min(K, len(g))
+        if k > 0:
+            idx = g["score"].nlargest(k).index
+            g.loc[idx, "pred"] = 1
+        return g
+
+    df = df.groupby("day", group_keys=False).apply(mark_top)
+
+    # Tages-Stats
+    day_stats = df.groupby("day").apply(lambda g: pd.Series({
+        "positives": int((g.insider == 1).sum()),
+        "tp":        int(((g.pred == 1) & (g.insider == 1)).sum()),
+        "fp":        int(((g.pred == 1) & (g.insider == 0)).sum()),
+        "alarms":    int(g.pred.sum())
+    })).reset_index()
+
+    # Recall je Tag (nur für Tage mit Positiven sinnvoll)
+    day_stats["recall_day"] = np.where(
+        day_stats["positives"] > 0,
+        day_stats["tp"] / day_stats["positives"],
+        np.nan
+    )
+    pos_days = day_stats[day_stats["positives"] > 0]
+
+    share_all_caught = float((pos_days["recall_day"] == 1.0).mean()) if len(pos_days) else np.nan
+    mean_recall_posdays = float(pos_days["recall_day"].mean()) if len(pos_days) else np.nan
+    median_recall_posdays = float(pos_days["recall_day"].median()) if len(pos_days) else np.nan
+
+    # Speichern & kurze Zusammenfassung
+    out_csv = Path(save_prefix + f"_K{K}.csv")
+    day_stats.to_csv(out_csv, index=False)
+
+    print(f"\nTages-Recall für K={K}:")
+    print(f"  Tage mit Positiven: {len(pos_days)} von {day_stats.shape[0]} Gesamt-Tagen")
+    print(f"  Anteil Tage mit Recall=1.0 (alle Positiven erwischt): {share_all_caught:.3f}")
+    print(f"  Ø Recall (nur Tage mit Positiven): {mean_recall_posdays:.3f} | Median: {median_recall_posdays:.3f}")
+    print(f"  Datei gespeichert: {out_csv}")
+
+    return day_stats
+
+
+
 
 # 1) Daten einlesen & Label binär machen
 SCRIPT = Path(__file__).resolve()
@@ -29,7 +100,7 @@ CSV_DAY = BASE / "dayr5.2.csv"
 
 print(f"Lade Daten: {CSV_DAY}")
 df = pd.read_csv(CSV_DAY)
-df["starttime"] = pd.to_datetime(df["starttime"])
+df["starttime"] = pd.to_datetime(df["starttime"], unit="s", errors="coerce")
 df["date"] = df["starttime"].dt.date
 # Label binär
 df["insider"] = (df["insider"] > 0).astype(int)
@@ -60,6 +131,7 @@ all_users = df["user"].unique()
 train_users = np.random.choice(all_users, size=int(0.8 * len(all_users)), replace=False)
 mask_train = df["user"].isin(train_users)
 
+order = df.loc[mask_train, "starttime"].sort_values().index
 X_train_full = X_sel[mask_train]
 y_train_full = y[mask_train]
 X_test = X_sel[~mask_train]
@@ -180,6 +252,8 @@ bst_final = xgb.train(
 
 # 7) Test-Evaluation & Plots
 y_pred_prob = bst_final.predict(dtest)
+df_eval = df_test[["starttime", "insider"]].copy()
+df_eval["score"] = y_pred_prob
 y_pred_05 = (y_pred_prob >= 0.5).astype(int)
 y_pred_f2 = (y_pred_prob >= thr_f2).astype(int)
 
@@ -236,44 +310,149 @@ def plot_cm(cm, title, fname):
 plot_cm(cm_05, "Confusion Matrix (t=0.5)", "cm_t05.png")
 plot_cm(cm_f2, f"Confusion Matrix (t={thr_f2:.2f})", "cm_tf2.png")
 
-# 8) SOC-Budget-Simulation + Plot
 
-df_eval = df_test[["starttime", "insider"]].copy()
-df_eval["score"] = y_pred_prob
 
-def simulate_budget(df_in, alarms_per_day):
-    df = df_in.copy()
-    df["pred"] = 0
-    def mark_top(g):
-        k = min(alarms_per_day, len(g))
-        top_idx = g.nlargest(k, "score").index
-        g.loc[top_idx, "pred"] = 1
-        return g
-    df = df.groupby(df["starttime"].dt.date, group_keys=False).apply(mark_top)
-    tp = ((df.pred == 1) & (df.insider == 1)).sum()
-    fp = ((df.pred == 1) & (df.insider == 0)).sum()
-    fn = ((df.pred == 0) & (df.insider == 1)).sum()
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    return precision, recall, tp, fp, fn
 
-budgets = [10, 25, 50, 100]
-results = []
-for b in budgets:
-    p, r, tp, fp, fn = simulate_budget(df_eval, b)
-    results.append({"alarms/day": b, "precision": p, "recall": r, "TP": tp, "FP": fp, "FN": fn})
-res_df = pd.DataFrame(results)
-res_df.to_csv(FIGDIR / "budget_simulation_results.csv", index=False)
+budgets = [25, 50, 100]
+res_df = pd.DataFrame([simulate_budget(df_eval, b) for b in budgets])
+print("\nSOC-Budget (Test):")
+print(res_df.to_string(index=False))
+
+res_df.to_csv(FIGDIR / "soc_budget_results.csv", index=False)
 
 plt.figure()
 plt.plot(res_df["alarms/day"], res_df["precision"], marker='o', label='Precision')
 plt.plot(res_df["alarms/day"], res_df["recall"], marker='o', label='Recall')
-plt.xlabel("Alarme pro Tag")
+plt.xlabel("Alarme pro Tag (Budget)")
 plt.ylabel("Wert")
-plt.title("Budget-Simulation (Test)")
+plt.title("SOC Budget-Simulation (Test)")
 plt.legend()
-plt.savefig(FIGDIR / "budget_precision_recall.png", **SAVEFIG_KW)
+plt.savefig(FIGDIR / "soc_budget_precision_recall.png", **SAVEFIG_KW)
 plt.close()
+# --- Ende SOC-Budget ---
+
+
+
+
+# --- Tages-Recall-Report (nach SOC-Budget-Block einfügen) ---
+
+# 7b) Regelbasierte Baseline (train-only Quantil-Regeln) + Metriken
+
+# Idee: sehr einfache Heuristik ohne Lernen.
+# - Für "Zähl"-Features (day_* mit 'n_' oder 'count') nutze 99%-Quantil (train)
+# - Für "Bytes"-Features (day_* mit 'bytes') nutze 99.5%-Quantil (train)
+# - Flag = 1, wenn mind. eine Regel greift; Score = Anteil überschrittener Regeln
+
+# 1) Spalten finden (robust gegen fehlende Namen)
+rb_cols_count = [c for c in df.columns if c.startswith("day_") and ("n_" in c or "count" in c)]
+rb_cols_bytes = [c for c in df.columns if c.startswith("day_") and ("bytes" in c)]
+
+# 2) Schwellen nur auf TRAIN-Usern fitten (keine Leckage)
+q_count = df.loc[mask_train, rb_cols_count].quantile(0.99, numeric_only=True) if rb_cols_count else pd.Series(dtype=float)
+q_bytes = df.loc[mask_train, rb_cols_bytes].quantile(0.995, numeric_only=True) if rb_cols_bytes else pd.Series(dtype=float)
+
+def rules_score(frame: pd.DataFrame) -> pd.Series:
+    # Anzahl aktiver Regeln je Zeile
+    trig = pd.Series(0, index=frame.index, dtype=int)
+    denom = 0
+    if len(q_count) > 0:
+        hit_count = (frame[q_count.index] >= q_count).sum(axis=1)
+        trig = trig.add(hit_count, fill_value=0)
+        denom += len(q_count)
+    if len(q_bytes) > 0:
+        hit_bytes = (frame[q_bytes.index] >= q_bytes).sum(axis=1)
+        trig = trig.add(hit_bytes, fill_value=0)
+        denom += len(q_bytes)
+    # Score: Anteil getriggerter Regeln (0..1), Pred: mind. eine Regel
+    score = (trig / max(denom, 1)).clip(0, 1)
+    return score
+
+
+# 3) Scores/Preds auf TEST
+rule_score_test = rules_score(df.loc[~mask_train])
+rule_pred_test = (rule_score_test > 0).astype(int)
+
+# 4) Performance wie beim Modell
+print("\nRegelbasierte Baseline — Testmetriken:")
+from sklearn.metrics import classification_report, roc_auc_score, average_precision_score, roc_curve, precision_recall_curve, confusion_matrix
+print(classification_report(y_test, rule_pred_test, zero_division=0))
+
+# Für ROC/PR nutzen wir den kontinuierlichen Rule-Score
+try:
+    auc_rb = roc_auc_score(y_test, rule_score_test)
+    ap_rb = average_precision_score(y_test, rule_score_test)
+    print(f"ROC-AUC (Baseline): {auc_rb:.6f}")
+    print(f"PR-AUC  (Baseline): {ap_rb:.6f}")
+except Exception as e:
+    print(f"AUC/AP (Baseline) nicht berechenbar: {e}")
+
+# Optional: ROC/PR-Plots für die Baseline
+fpr_rb, tpr_rb, _ = roc_curve(y_test, rule_score_test)
+prec_rb, rec_rb, _ = precision_recall_curve(y_test, rule_score_test)
+
+plt.figure()
+plt.plot(fpr_rb, tpr_rb, linewidth=2)
+plt.plot([0,1], [0,1], linestyle="--")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC (Regel-Baseline)")
+plt.savefig(FIGDIR / "baseline_roc.png", **SAVEFIG_KW)
+plt.close()
+
+plt.figure()
+plt.plot(rec_rb, prec_rb, linewidth=2)
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision–Recall (Regel-Baseline)")
+plt.savefig(FIGDIR / "baseline_pr.png", **SAVEFIG_KW)
+plt.close()
+
+# Konfusionsmatrix (t=0/1 auf Rule-Score)
+cm_rb = confusion_matrix(y_test, rule_pred_test)
+def plot_cm_rb(cm, title, fname):
+    plt.figure()
+    im = plt.imshow(cm, interpolation='nearest')
+    plt.title(title); plt.colorbar(im, fraction=0.046, pad=0.04)
+    classes = ["Normal", "Insider"]; ticks = np.arange(len(classes))
+    plt.xticks(ticks, classes); plt.yticks(ticks, classes)
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(j, i, format(cm[i, j], 'd'), ha="center", va="center")
+    plt.ylabel('True label'); plt.xlabel('Predicted label')
+    plt.savefig(FIGDIR / fname, **SAVEFIG_KW); plt.close()
+plot_cm_rb(cm_rb, "Confusion Matrix — Regel-Baseline", "baseline_cm.png")
+
+# 5) SOC-Budget auf Regel-Baseline (gleiche Funktion wie oben nutzen)
+df_eval_rule = df_test[["starttime", "insider"]].copy()
+df_eval_rule["score"] = rule_score_test.values  # wichtiger: kontinuierlicher Score
+budgets_rb = [25, 50, 100]
+res_rb = pd.DataFrame([simulate_budget(df_eval_rule, b) for b in budgets_rb])
+print("\nSOC-Budget (Regel-Baseline, Test):")
+print(res_rb.to_string(index=False))
+res_rb.to_csv(FIGDIR / "soc_budget_baseline_results.csv", index=False)
+
+# 6) Tages-Recall-Quote für Baseline (falls du den Report schon definiert hast)
+try:
+    for K in budgets_rb:
+        _ = daily_recall_report(df_eval_rule, K, save_prefix=f"{FIGDIR}/daily_recall_baseline")
+except NameError:
+    # Falls daily_recall_report in deinem Skript nicht definiert ist, diesen Block ignorieren
+    pass
+
+
+
+
+# --- SOC-Budget-Simulation (25/50/100) ---
+df_eval = df_test[["starttime", "insider"]].copy()
+df_eval["score"] = y_pred_prob
+
+
+
+
+# Für K in {25, 50, 100} ausgeben
+for K in [25, 50, 100]:
+    _ = daily_recall_report(df_eval, K)
+# --- Ende Tages-Recall-Report ---
 
 # 9) Kalibrierung (Test)
 prob_true, prob_pred = calibration_curve(y_test, y_pred_prob, n_bins=10)
@@ -366,6 +545,12 @@ summary = {
     "test_ap": float(ap_t),
     "threshold_f2": float(thr_f2)
 }
+print("Test-Zeitraum:", df_test["starttime"].min(), "→", df_test["starttime"].max())
+print("Einzigartige Tage im Test:", df_test["starttime"].dt.normalize().nunique())
+
 pd.Series(summary).to_csv(FIGDIR / "training_summary.csv")
+print("\nFinal Test Evaluation (t=F2):")
+from sklearn.metrics import classification_report
+print(classification_report(y_test, (y_pred_prob >= thr_f2).astype(int), zero_division=0))
 
 print(f"\nFertige Grafiken & Tabellen gespeichert in: {FIGDIR}")

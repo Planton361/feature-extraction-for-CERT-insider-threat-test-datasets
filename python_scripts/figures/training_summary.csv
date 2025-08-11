@@ -1,0 +1,10 @@
+,0
+n_train_users,1600.0
+n_test_users,400.0
+n_features_final,247.0
+cv_aupr_mean,0.36208673692567633
+cv_roc_mean,0.8248486238943225
+best_iter_median,168.0
+test_auc,0.9861824407403502
+test_ap,0.5523715658674334
+threshold_f2,0.17628666973114118

@@ -23,9 +23,9 @@ def run_exp_onealg(run, slw, x, clf_name, classifiers, res_by_user, st):
         clf_copy.set_params(**{'random_state': run})
 
     clf_res = clf_helpers.do_classification(clf_copy, x['train'], slw['y_train_bin'],
-                                        x['test'], slw['y_test_bin'],
-                                        y_org={'train': slw['y_train'], 'test': slw['y_test']},
-                                        by_user=res_by_user, split_output=slw)
+                                            x['test'], slw['y_test_bin'],
+                                            y_org={'train': slw['y_train'], 'test': slw['y_test']},
+                                            by_user=res_by_user, split_output=slw)
     res = {'train': clf_res[1], 'test_in': clf_res[2]}
     print('Training time: ', res['train']['train_time'])
     print('Train confusion matrices: ', res['train']['cms'])

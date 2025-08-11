@@ -1,3 +1,8 @@
+
+# Code übernommen aus lcd-dal/feature-extraction-for-CERT-datasets
+# Quelle: https://github.com/lcd-dal/feature-extraction-for-CERT-datasets
+# Lizenz: MIT License
+
 from copy import deepcopy
 import pickle
 import gc
@@ -128,7 +133,7 @@ if __name__ == "__main__":
     algs = ['RF']
     nrun = 2
 
-    dname = 'r5.2'
+    dname = 'everytinhg'
     dtypes = ['week']
     mode = 'by_user_time'
 

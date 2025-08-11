@@ -1,3 +1,9 @@
+
+# Code übernommen aus lcd-dal/feature-extraction-for-CERT-datasets
+# Quelle: https://github.com/lcd-dal/feature-extraction-for-CERT-datasets
+# Lizenz: MIT License
+
+
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, auc
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, MaxAbsScaler
